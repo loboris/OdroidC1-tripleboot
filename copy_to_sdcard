@@ -1,0 +1,580 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+. params.sh
+. func.sh
+
+echo ""
+date
+echo "************************************************************"
+echo "Copy directories to sdcard/image and prepare for triple boot"
+echo "************************************************************"
+echo ""
+
+# directory where are your android filesystems
+indir="$bkpdir"
+# linux source dir
+linuxdir="$bkpdir/linux"
+# OpenELEC source dir
+oelecdir="$bkpdir/openELECimg"
+
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 2
+
+#--- CHECK --------------------------------------------------------------------------
+if [ ! -d $indir ]; then
+	echo "Source directory $indir not found"
+	exit 1
+fi
+if [ ! -d bootselramfs ]; then
+	echo "bootselramfs directory not found"
+	exit 1
+fi
+
+check_sdcard "nocreate"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+get_partstruct
+
+if [ "${system_start}" = "" ] || [ "${userdata_start}" = "" ] || [ "${cache_start}" = "" ] || [ "${storage_start}" = "" ]; then
+	echo "Bad SDCard partition structure !"
+	exit 1
+fi
+if [ "${dualb}" = "" ]; then
+	echo "Bad SDCard partition structure 2!"
+else
+	if [ ! "${storage_start}" = "49152" ]; then
+		echo "Bad SDCard partition structure 3!"
+		exit 1
+	fi
+fi
+#------------------------------------------------------------------------------------
+
+echo ""
+echo "Analyzing filesystems ..."
+echo "----------------------------"
+if [ -d ${indir}/system ]; then
+	fs_size=`du -s ${indir}/system | awk '{print $1}'`
+	ffs_size=$(( $fs_size + 50000 ))
+	mfs_size=$(( $fs_size / 1024 ))
+	if [ $ffs_size -gt $ksystem_size ]; then
+		_stat="too small"
+	else
+		_stat="OK"
+		ssystem="ok"
+	fi
+else
+	_stat="not found"
+fi
+printf "%10s" "system"; printf "%8s" "${mfs_size}M"; printf "%10s\n" "$_stat"
+
+if [ -d ${indir}/userdata ]; then
+	fs_size=`du -s ${indir}/userdata | awk '{print $1}'`
+	ffs_size=$(( $fs_size + 100000 ))
+	mfs_size=$(( $fs_size / 1024 ))
+	if [ $ffs_size -gt $kuserdata_size ]; then
+		_stat="too small"
+	else
+		_stat="OK"
+		suserdata="ok"
+	fi
+else
+	_stat="not found"
+fi
+printf "%10s" "userdata"; printf "%8s" "${mfs_size}M"; printf "%10s\n" "$_stat"
+
+if [ -d ${indir}/cache ]; then
+	fs_size=`du -s ${indir}/cache | awk '{print $1}'`
+	ffs_size=$(( $fs_size + 100000 ))
+	mfs_size=$(( $fs_size / 1024 ))
+	if [ $ffs_size -gt $kcache_size ]; then
+		_stat="too small"
+	else
+		_stat="OK"
+		scache="ok"
+	fi
+else
+	_stat="not found"
+fi
+printf "%10s" "cache"; printf "%8s" "${mfs_size}M"; printf "%10s\n" "$_stat"
+
+if [ -d ${indir}/storage ]; then
+	fs_size=`du -s ${indir}/storage | awk '{print $1}'`
+	ffs_size=$(( $fs_size + 100000 ))
+	mfs_size=$(( $fs_size / 1024 ))
+	if [ $ffs_size -gt $kstorage_size ]; then
+		_stat="too small"
+	else
+		_stat="OK"
+		sstorage="ok"
+	fi
+else
+	_stat="not found"
+fi
+printf "%10s" "storage"; printf "%8s" "${mfs_size}M"; printf "%10s\n" "$_stat"
+
+if [ -d ${linuxdir} ]; then
+	fs_size=`du -s ${linuxdir} | awk '{print $1}'`
+	ffs_size=$(( $fs_size + 100000 ))
+	mfs_size=$(( $fs_size / 1024 ))
+	if [ $ffs_size -gt $klinux_size ]; then
+		_stat="too small"
+	else
+		_stat="OK"
+		slinux="ok"
+	fi
+else
+	_stat="not found"
+fi
+printf "%10s" "linux"; printf "%8s" "${mfs_size}M"; printf "%10s\n" "$_stat"
+echo "----------------------------"
+echo "."
+
+#------------------------------------------------------------------------------------
+echo -n "WARNING: Partitions on SD card $sdcard WILL BE UPDATED !, Continue (y/N)?  "
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+echo "."
+#------------------------------------------------------------------------------------
+
+
+mkdir _mnt > /dev/null 2>&1
+
+
+if [ "${_isimage}" = "yes" ] ; then
+	map_image
+	if [ $? -ne 0 ]; then
+		exit 1
+	fi
+	partmap=$loop_mapp
+else
+	partmap=$sdcard
+fi
+
+#=== SYSTEM ====================================================================================
+echo ""
+umount _mnt > /dev/null 2>&1
+if [ "${ssystem}" = "ok" ] ; then
+	mount ${partmap}2 _mnt
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${partmap}2"
+		if [ "${_isimage}" = "yes" ] ; then
+			unmap_image
+		fi
+		exit 1
+	fi
+	echo "Copying system partition ..."
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${indir}/system/ _mnt/ > /dev/null 2>&1
+	echo "wait..."
+	sync
+	
+	if [ -f _mnt/fstab.odroidc ]; then
+	  echo " *Corecting fstab.odroidc ..."
+	  cat _mnt/fstab.odroidc | sed s/"mmcblk0p4"/"mmcblk0p5"/g > _fstab_
+	  mv _fstab_ _mnt/fstab.odroidc
+	fi
+	
+	mkdir -p _mnt/etc/init.d > /dev/null 2>&1
+	chmod 0755 _mnt/etc/init.d > /dev/null 2>&1
+	
+	if [ ! "${skip_OpenELEC}" = "yes" ] || [ ! "${skip_linux}" = "yes" ]; then
+	    echo "#!/system/bin/sh" > _mnt/etc/init.d/setboot
+	    echo "while [ ! -f /storage/sdcard0/bootsel.ini ]; do" >> _mnt/etc/init.d/setboot
+	    echo "  /system/bin/sleep 1" >> _mnt/etc/init.d/setboot
+	    echo "done" >> _mnt/etc/init.d/setboot
+	    echo "/system/bin/cp /storage/sdcard0/bootsel.ini /storage/sdcard0/boot.ini" >> _mnt/etc/init.d/setboot
+	    chmod 0755 _mnt/etc/init.d/setboot
+	else
+	    rm _mnt/etc/init.d/setboot > /dev/null 2>&1
+	fi
+	
+	sleep 1
+	echo ""
+	echo " *Checking for the presence of sysinit in /system/bin..."
+	sleep 1
+	if [ -e _mnt/bin/sysinit ]; then
+		echo "  sysinit found..."
+		if [ -z "`cat _mnt/bin/sysinit | grep "init.d"`" ]; then
+			echo "  Adding lines to sysinit..."
+			echo "" >> _mnt/bin/sysinit
+			echo "# init.d support" >> _mnt/bin/sysinit
+			echo "" >> _mnt/bin/sysinit
+			echo "export PATH=/sbin:/system/sbin:/system/bin:/system/xbin" >> _mnt/bin/sysinit
+			echo "run-parts /system/etc/init.d" >> _mnt/bin/sysinit 
+			echo "" >> _mnt/bin/sysinit
+		else
+			echo "  Your sysinit should already be running the scripts in init.d folder at boot..."
+		fi
+	else
+		echo "  sysinit not found, creating file..."
+		echo "#!/system/bin/sh" > _mnt/bin/sysinit
+		echo "# init.d support" >> _mnt/bin/sysinit
+		echo "" >> _mnt/bin/sysinit
+		echo "export PATH=/sbin:/system/sbin:/system/bin:/system/xbin" >> _mnt/bin/sysinit
+		echo "run-parts /system/etc/init.d" >> _mnt/bin/sysinit 
+		echo "" >> _mnt/bin/sysinit
+	fi
+
+	echo "  Setting correct permissions and ownership for sysinit..."
+	chmod 755 _mnt/bin/sysinit
+	chown 0:2000 _mnt/bin/sysinit
+
+	echo ""
+	echo " *Checking for the presence of install-recovery.sh..."
+	sleep 1
+	if [ -f _mnt/etc/install-recovery.sh ] && [ -z "`cat _mnt/etc/install-recovery.sh | grep "daemon"`" ]; then
+		if [ ! -z "`cat _mnt/etc/install-recovery.sh | grep "init.d"`" ];then
+			echo "  Your install-recovery.sh seems to be already modified for init.d..."
+		else
+		    echo "  install-recovery.sh found, renaming it as install-recovery-2.sh..."
+		    mv _mnt/etc/install-recovery.sh _mnt/etc/install-recovery-2.sh
+		    echo "  Recreating install-recovery.sh..."
+		    echo "#!/system/bin/sh" > _mnt/etc/install-recovery.sh
+		    echo "# init.d support" >> _mnt/etc/install-recovery.sh
+		    echo "" >> _mnt/etc/install-recovery.sh
+		    echo "/system/bin/sysinit" >> _mnt/etc/install-recovery.sh
+		    echo "" >> _mnt/etc/install-recovery.sh
+		    echo "# excecuting extra commands" >> _mnt/etc/install-recovery.sh
+		    echo "/system/etc/install-recovery-2.sh" >> _mnt/etc/install-recovery.sh
+		    echo "" >> _mnt/etc/install-recovery.sh
+		fi
+	elif [ -f _mnt/etc/install-recovery.sh ] && [ ! -z "`cat _mnt/etc/install-recovery.sh | grep "daemon"`" ]; then
+		if [ -f _mnt/etc/install-recovery-2.sh ] && [ ! -z "`cat _mnt/etc/install-recovery-2.sh | grep "init.d"`" ];then
+			echo "Your install-recovery-2.sh seems to be already modified for init.d..."
+		else
+		    echo "  install-recovery.sh is used for superuser, using install-recovery-2.sh instead..."
+		    if [ -f _mnt/etc/install-recovery-2.sh ]; then
+			    echo "" >> _mnt/etc/install-recovery-2.sh
+			    echo "# init.d support" >> _mnt/etc/install-recovery-2.sh
+			    echo "/system/bin/sysinit" >> _mnt/etc/install-recovery-2.sh
+			    echo "" >> _mnt/etc/install-recovery-2.sh
+		    else
+			    echo "#!/system/bin/sh" > _mnt/etc/install-recovery-2.sh
+			    echo "# init.d support" >> _mnt/etc/install-recovery-2.sh
+			    echo "" >> _mnt/etc/install-recovery-2.sh
+			    echo "/system/bin/sysinit" >> _mnt/etc/install-recovery-2.sh
+			    echo "" >> _mnt/etc/install-recovery-2.sh
+		    fi
+		    if [ -z "`cat _mnt/etc/install-recovery.sh | grep "install-recovery-2.sh"`" ]; then
+			    echo "" >> _mnt/etc/install-recovery.sh
+			    echo "# extra commands" >> _mnt/etc/install-recovery.sh
+			    echo "/system/etc/install-recovery-2.sh" >> _mnt/etc/install-recovery.sh
+			    echo "" >> _mnt/etc/install-recovery.sh
+		    fi
+		fi
+	else
+		echo "  install-recovery.sh not found, creating it..."
+		echo "#!/system/bin/sh" > _mnt/etc/install-recovery.sh
+		echo "# init.d support" >> _mnt/etc/install-recovery.sh
+		echo "" >> _mnt/etc/install-recovery.sh
+		echo "/system/bin/sysinit" >> _mnt/etc/install-recovery.sh
+		echo "" >> _mnt/etc/install-recovery.sh
+	fi
+
+	echo " *Setting the correct permissions and ownership for install-recovery.sh..."
+	echo "  Also for install-recovery-2.sh if it exists..."
+	chmod 755 _mnt/etc/install-recovery.sh
+	chown 0:0 _mnt/etc/install-recovery.sh
+	if [ -f _mnt/etc/install-recovery-2.sh ]; then
+		chmod 755 _mnt/etc/install-recovery-2.sh
+		chown 0:0 _mnt/etc/install-recovery-2.sh
+	fi
+
+	umount _mnt
+fi
+sleep 1
+
+#===============================================================================================
+echo ""
+umount _mnt > /dev/null 2>&1
+if [ "${suserdata}" = "ok" ] ; then
+	mount ${partmap}3 _mnt
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${partmap}3"
+		if [ "${_isimage}" = "yes" ] ; then
+			unmap_image
+		fi
+		exit 1
+	fi
+	echo "Copying userdata partition ..."
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${indir}/userdata/ _mnt/ > /dev/null 2>&1
+	echo "wait..."
+	sync
+	umount _mnt
+fi
+sleep 1
+
+#===============================================================================================
+echo ""
+umount _mnt > /dev/null 2>&1
+if [ "${scache}" = "ok" ] ; then
+	mount ${partmap}5 _mnt
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${partmap}5"
+		if [ "${_isimage}" = "yes" ] ; then
+			unmap_image
+		fi
+		exit 1
+	fi
+	echo "Copying cache partition ..."
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${indir}/cache/ _mnt/ > /dev/null 2>&1
+	echo "wait..."
+	sync
+	umount _mnt
+fi
+sleep 1
+
+#===============================================================================================
+echo ""
+umount _mnt > /dev/null 2>&1
+if [ "${sstorage}" = "ok" ] ; then
+	mount ${partmap}1 _mnt
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${partmap}1"
+		if [ "${_isimage}" = "yes" ] ; then
+			unmap_image
+		fi
+		exit 1
+	fi
+	echo "Copying storage partition ..."
+
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${indir}/storage/ _mnt/ > /dev/null 2>&1
+	echo "wait..."
+	sync
+
+	cp bootselramfs/uInitrd.sel _mnt/
+	cp bootselramfs/uImage.sel _mnt/
+	
+	if [ ! "${skip_linux}" = "yes" ]; then
+	    echo " *Copying linux boot files (kernel, initramfs, dtb) ..."
+	    if [ -d ${indir}/lin_fat ]; then
+		    if [ -f ${indir}/lin_fat/uImage ]; then
+			    cp -a ${indir}/lin_fat/uImage _mnt/
+		    fi
+		    if [ -f ${indir}/lin_fat/uInitrd ]; then
+			    cp -a ${indir}/lin_fat/uInitrd _mnt/
+		    fi
+		    if [ -f ${indir}/lin_fat/meson8b_odroidc.dtb ]; then
+			    cp -a ${indir}/lin_fat/meson8b_odroidc.dtb _mnt/
+		    fi
+		    echo " *Linux boot files copied from ${indir}/lin_fat."
+	    else
+		    if [ -d ${linuxdir}/boot ]; then
+			    if [ -f ${linuxdir}/boot/uImage ]; then
+				    cp -a ${linuxdir}/boot/uImage _mnt/
+			    fi
+			    if [ -f ${linuxdir}/boot/uInitrd ]; then
+				    cp -a ${linuxdir}/boot/uInitrd _mnt/
+			    fi
+			    if [ -f ${linuxdir}/boot/meson8b_odroidc.dtb ]; then
+				    cp -a ${linuxdir}/boot/meson8b_odroidc.dtb _mnt/
+			    fi
+			    echo " *Linux boot files copied from ${linuxdir}/boot."
+		    fi
+	    fi
+	    if [ ! -f _mnt/uImage ]; then
+		    echo "  WARNING: uImage not found !"
+	    fi
+	    if [ ! -f _mnt/uInitrd ]; then
+		    echo "  WARNING: uIinitrd not found !"
+	    fi
+	    if [ ! -f _mnt/meson8b_odroidc.dtb ]; then
+		    echo "  WARNING: meson8b_odroidc.dtb not found !"
+	    fi
+	else
+	  rm _mnt/uInitrd > /dev/null 2>&1
+	  rm _mnt/uImage > /dev/null 2>&1
+	  rm _mnt/meson8b_odroidc.dtb > /dev/null 2>&1
+	fi
+	
+	if [ ! "${skip_OpenELEC}" = "yes" ]; then
+	    if [ -d ${oelecdir}/System ]; then
+		echo " *Copying OpenELEC boot and system files ..."
+		cp -a ${oelecdir}/System/INITRD _mnt/
+		cp -a ${oelecdir}/System/KERNEL _mnt/
+		cp -a ${oelecdir}/System/SYSTEM _mnt/
+	    else
+		echo "  WARNING: OpenELEC System dir \"${oelecdir}/System\" not found!"
+		if [ -f _mnt/SYSTEM ]; then
+		  echo "  OpenELEC system files already on Storage partition."
+		fi
+	    fi
+	else
+	  rm _mnt/INITRD > /dev/null 2>&1
+	  rm _mnt/KERNEL > /dev/null 2>&1
+	  rm _mnt/SYSTEM > /dev/null 2>&1
+	fi
+
+	# === Configure multiboot =================================================
+	echo " *Creating \"bootandroid.ini\""
+	cp bootandroid.ini _mnt/bootandroid.ini
+
+	if [ ! "${skip_linux}" = "yes" ]; then
+	    echo " *Creating \"bootlinux.ini\""
+	    cp bootlinux.ini _mnt/bootlinux.ini
+	else
+	    rm _mnt/bootlinux.ini > /dev/null 2>&1
+	fi
+
+	if [ ! "${skip_OpenELEC}" = "yes" ] || [ ! "${skip_linux}" = "yes" ]; then
+	    echo " *Creating \"bootsel.ini\""
+	    cp bootsel.ini _mnt/bootsel.ini
+	    cp bootsel.ini _mnt/boot.ini
+	else
+	    cp _mnt/bootandroid.ini _mnt/boot.ini
+	fi
+		
+	if [ ! "${skip_OpenELEC}" = "yes" ]; then
+	    echo " *Creating \"bootoelec.ini\""
+	    cp bootoelec.ini _mnt/bootoelec.ini
+	else
+	    rm _mnt/bootoelec.ini > /dev/null 2>&1
+	fi
+	# =========================================================================
+	umount _mnt
+fi
+sleep 1
+
+#===============================================================================================
+echo ""
+umount _mnt > /dev/null 2>&1
+
+
+if [ ! "${skip_linux}" = "yes" ] && [ "${slinux}" = "ok" ] ; then
+        _get_fstype=`file -sL ${partmap}7 | grep BTRFS`
+        
+	if [ ! "${_get_fstype}" = "" ] ; then
+	    mount -o compress-force=lzo ${partmap}7 _mnt > /dev/null 2>&1
+	else
+	    mount ${partmap}7 _mnt > /dev/null 2>&1
+	fi
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${partmap}7"
+		if [ "${_isimage}" = "yes" ] ; then
+			unmap_image
+		fi
+		exit 1
+	fi
+	if [ ! "${_get_fstype}" = "" ] ; then
+	  echo "Copying Linux partition (btrfs) ..."
+	else
+	  echo "Copying Linux partition ..."
+	fi
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${linuxdir}/ _mnt/ > /dev/null 2>&1
+	echo "wait..."
+	sync
+	
+	if [ -d _mnt/etc ]; then
+		echo " *Creating \"fstab\""
+		mkdir -p _mnt/media/android > /dev/null 2>&1
+		mkdir -p _mnt/media/boot > /dev/null 2>&1
+		rm -rf _mnt/media/boot/* > /dev/null 2>&1
+		#rmdir _mnt/media/boot > /dev/null 2>&1
+
+		echo "# Odroid tripleboot fstab" > _mnt/etc/fstab
+		echo "" >> _mnt/etc/fstab
+		if [ ! "${_get_fstype}" = "" ] ; then
+		    echo "LABEL=linux	/			btrfs	noatime,nodiratime,compress=lzo  0 1" >> _mnt/etc/fstab
+		else
+		    echo "LABEL=linux	/			ext4	errors=remount-ro,noatime,nodiratime  0 1" >> _mnt/etc/fstab
+		fi
+		echo "/dev/mmcblk0p1	/media/android	vfat	defaults,rw,owner,flush,umask=000  0 0" >> _mnt/etc/fstab
+		echo "tmpfs /tmp  tmpfs nodev,nosuid,mode=1777  0 0" >> _mnt/etc/fstab
+		if [ "${_get_fstype}" = "" ] ; then
+		    if [ -f _mnt/.swapfile ];then
+			    echo "/.swapfile	none			swap	sw	0 0" >> _mnt/etc/fstab
+		    fi
+		else
+		    if [ -f _mnt/.swapfile ];then
+			    rm _mnt/.swapfile > /dev/null 2>&1
+		    fi
+		fi
+		if [ "${skip_OpenELEC}" = "yes" ]; then
+		    echo "LABEL=swap	none			swap	sw	0 0" >> _mnt/etc/fstab
+		fi
+	else
+		echo " *ERROR* /etc not found, fstab not created !"
+	fi
+	
+	if [ -f _mnt/etc/rc.local ]; then
+	  echo " *Corecting rc.local for tripleboot ..."
+	  _rcl_ok=`cat _mnt/etc/rc.local | grep "cp /media/android/bootsel.ini"`
+	  if [ "${_rcl_ok}" = "" ] ; then
+	      cat _mnt/etc/rc.local | sed s/"^exit 0"/"cp \/media\/android\/bootsel.ini \/media\/android\/boot.ini"/g > _rcloc_
+	      _rcl_ok=`cat _rcloc_ | grep "echo 1728000 >"`
+	      if [ "${_rcl_ok}" = "" ] ; then
+		  echo "# ** Overclock to 1.728 GHz" >> _rcloc_
+		  echo "#echo 1728000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq" >> _rcloc_
+	      fi
+	      echo "exit 0" >> _rcloc_
+	      mv _rcloc_ _mnt/etc/rc.local
+	  fi
+	  chmod 0755 _mnt/etc/rc.local
+	else
+	  echo " *ERROR* /etc/rc.local not found !"
+	fi
+	
+	umount _mnt
+fi
+sleep 1
+
+#===============================================================================================
+if [ ! "${skip_OpenELEC}" = "yes" ]; then
+  echo ""
+  umount _mnt > /dev/null 2>&1
+
+  mount ${partmap}6 _mnt
+  if [ $? -ne 0 ]; then
+	  echo "ERROR mounting ${partmap}6"
+	  if [ "${_isimage}" = "yes" ] ; then
+		  unmap_image
+	  fi
+	  exit 1
+  fi
+  echo "Preparing OpenELEC Storage partition ..."
+  mkdir _mnt/music > /dev/null 2>&1
+  mkdir _mnt/pictures > /dev/null 2>&1
+  mkdir _mnt/screenshots > /dev/null 2>&1
+  mkdir _mnt/tvshows > /dev/null 2>&1
+  mkdir _mnt/videos > /dev/null 2>&1
+
+  if [ -d ${indir}/openElec ]; then
+	  echo "Restoring OpenELEC Storage data ..."
+	  rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${indir}/openElec/ _mnt/ > /dev/null 2>&1
+	  echo "wait..."
+	  sync
+  fi
+
+  umount _mnt
+  sleep 1
+fi
+
+#===============================================================================================
+echo ""
+echo "====================================="
+if [ "${_isimage}" = "yes" ] ; then
+    echo "File systems saved to sdcard image."
+else
+    echo "File systems saved to sdcard."
+fi
+echo "SD Card id now ready for triple boot."
+echo "====================================="
+echo ""
+
+if [ "${_isimage}" = "yes" ] ; then
+	unmap_image
+fi
+#===============================================================================================

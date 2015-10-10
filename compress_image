@@ -1,0 +1,28 @@
+#!/bin/bash
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+
+echo ""
+date
+echo "========================="
+echo "Compressing SD Card image"
+echo "========================="
+echo ""
+
+if [ "${1}" = "" ]; then
+    echo "Image name not specified."
+    echo "USAGE: compress_image <image_name>"
+    exit 0
+fi
+
+sdcard="$1"
+
+xz -z -k -9 -f -v $sdcard
+md5sum $sdcard > $sdcard.md5sum
+md5sum $sdcard.xz > $sdcard.xz.md5sum
+
+exit 0

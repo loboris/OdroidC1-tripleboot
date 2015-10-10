@@ -1,0 +1,337 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+
+. params.sh
+. func.sh
+
+echo ""
+date
+echo "****************************"
+echo "Create triple boot sd card  "
+echo "****************************"
+echo ""
+
+
+_isimage="no"
+_ddopt=""
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 2
+
+# CHECK
+# ======================================================================
+check_bootfiles
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+check_sdcard "create"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+
+echo ""
+# Test sdcard/image size
+sdcard_sect=`fdisk -l $sdcard | grep "Disk $sdcard" | awk '{print $7}'`
+if [ $? -ne 0 ]; then
+    echo "ERROR reading $sdcard"
+    exit 1
+fi
+
+if [ "${sdcard_sect}" = "" ]; then
+    sdcard_sect=`fdisk -l $sdcard | grep total | awk '{print $8}'`
+    if [ $? -ne 0 ]; then
+	echo "ERROR reading $sdcard"
+	exit 1
+    fi
+fi
+if [ "${sdcard_sect}" = "" ] ; then
+	echo "ERROR reading $sdcard"
+	exit 1
+fi
+
+sdcard_size=$(expr $sdcard_sect / 2048)
+if [ ! "${skip_linux}" = "yes" ]; then
+    requested_size=$(( $storage_size + $system_size + $userdata_size + $cache_size + $oelec_size + 600 ))
+else
+    requested_size=$(( $storage_size + $system_size + $userdata_size + $cache_size + $oelec_size + 16 ))
+fi
+if [ $requested_size -gt $sdcard_size ]; then
+	echo "SD Card size (${sdcard_size}M) too small for your partition layout (${requested_size}M) !"
+	exit 1
+fi
+
+if [ "${_isimage}" = "yes" ] ; then
+    echo -n "WARNING: SD card image $sdcard WILL BE ERASED !, Continue (y/N)?  "
+else
+    echo -n "WARNING: SD card $sdcard WILL BE ERASED !, Continue (y/N)?  "
+fi
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+
+# ======================================================================
+# ** calculate new partitions sizes **
+
+_sz=$(expr $storage_size \* 2048)
+nstorage_start=49152
+nstorage_end=$(expr $nstorage_start + $_sz - 1)
+
+_sz=$(expr $system_size \* 2048)
+nsystem_start=$(expr $nstorage_end + 1)
+nsystem_end=$(expr $nsystem_start + $_sz - 1)
+
+_sz=$(expr $userdata_size \* 2048)
+nuserdata_start=$(expr $nsystem_end + 1)
+nuserdata_end=$(expr $nuserdata_start + $_sz - 1)
+
+nextended_start=$(expr $nuserdata_end + 1)
+
+#-------------------------------------------------------------------
+echo ""
+echo "Erasing sd card ${sdcard} ..."
+dd if=/dev/zero of=${sdcard} bs=1M count=64 $_ddopt > /dev/null 2>&1
+
+#------------------------------------------------
+echo "Creating new filesystem on $sdcard ..."
+echo -e "o\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "ERROR."
+    exit 1
+fi
+sync
+echo "  New filesystem created on SD card."
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+# *** CreatE partitions *********************************************************************
+echo ""
+echo "Creating storage partition on $sdcard..."
+echo -e "n\np\n1\n$nstorage_start\n$nstorage_end\nt\nc\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+echo "Creating system partition on $sdcard..."
+echo -e "n\np\n2\n$nsystem_start\n$nsystem_end\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+echo "Creating userdata partition on $sdcard..."
+echo -e "n\np\n3\n$nuserdata_start\n$nuserdata_end\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+echo "Creating extended partition on $sdcard..."
+echo -e "n\ne\n$nextended_start\n\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+echo "Creating cache partition on $sdcard..."
+echo -e "n\n\n+${cache_size}M\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+if [ ! "${skip_OpenELEC}" = "yes" ]; then
+    echo "Creating OpenELEC partition on $sdcard..."
+else
+    echo "Creating swap partition on $sdcard..."
+fi
+echo -e "n\n\n+${oelec_size}M\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+echo ""
+echo "Creating linux partition on $sdcard..."
+echo -e "n\n\n\nw" | fdisk ${sdcard} > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR."
+	exit 1
+fi
+sleep 1
+if [ ! "${_isimage}" = "yes" ] ; then
+    partprobe -s ${sdcard} > /dev/null 2>&1
+    sleep 1
+fi
+
+# SHOW PARTITION STRUCTURE
+sync
+fdisk -l ${sdcard}
+
+# *** FORMATING partitions ***************************************
+echo ""
+echo "Formating partitions ..."
+
+# === STORAGE ====================================================
+if [ "${_isimage}" = "yes" ] ; then
+	format_image_part "1" "vfat" "STORAGE"
+else
+	mkfs -t vfat -n STORAGE ${sdcard}1 > /dev/null 2>&1
+fi
+if [ $? -ne 0 ]; then
+	echo "ERROR formating storage partition."
+	exit 1
+fi
+echo "storage partition formated."
+sync
+
+# === system ======================================================
+if [ "${_isimage}" = "yes" ] ; then
+	format_image_part "2" "ext4" "system"
+else
+	mkfs -F -t ext4 -L system ${sdcard}2 > /dev/null 2>&1
+fi
+if [ $? -ne 0 ]; then
+	echo "ERROR formating system partition."
+	exit 1
+fi
+echo "system partition formated."
+sync
+
+# === userdata ====================================================
+if [ "${_isimage}" = "yes" ] ; then
+	format_image_part "3" "ext4" "userdata"
+else
+	mkfs -F -t ext4 -L userdata ${sdcard}3 > /dev/null 2>&1
+fi
+if [ $? -ne 0 ]; then
+	echo "ERROR formating userdata partition."
+	exit 1
+fi
+echo "userdata partition formated."
+sync
+
+# === cache ========================================================
+if [ "${_isimage}" = "yes" ] ; then
+	format_image_part "5" "ext4" "cache"
+else
+	mkfs -F -t ext4 -L cache ${sdcard}5 > /dev/null 2>&1
+fi
+if [ $? -ne 0 ]; then
+	echo "ERROR formating cache partition."
+	exit 1
+fi
+echo "cache partition formated."
+sync
+
+# === oElec ============================================================
+if [ ! "${skip_OpenELEC}" = "yes" ] || [ "${skip_linux}" = "yes" ]; then
+    if [ "${_isimage}" = "yes" ] ; then
+	    format_image_part "6" "ext4" "oElec"
+    else
+	    mkfs -F -t ext4 -L oElec ${sdcard}6 > /dev/null 2>&1
+    fi
+    if [ $? -ne 0 ]; then
+	    echo "ERROR formating openElec partition."
+	    exit 1
+    fi
+    echo "OpenElec partition formated."
+else
+    if [ "${_isimage}" = "yes" ] ; then
+	    format_image_part "6" "swap" "swap"
+    else
+	    mkswap -L swap ${sdcard}6 > /dev/null 2>&1
+    fi
+    if [ $? -ne 0 ]; then
+	    echo "ERROR formating swap partition."
+	    exit 1
+    fi
+    echo "Swap partition formated."
+fi
+sync
+
+# === linux =======================================================
+if [ "${_isimage}" = "yes" ] ; then
+	if [ "${linux_fs_type}" = "btrfs" ] ; then
+	    format_image_part "7" "btrfs" "linux"
+	else
+	    format_image_part "7" "ext4" "linux"
+	fi
+else
+	if [ "${linux_fs_type}" = "btrfs" ] ; then
+	    mkfs.btrfs -f -L linux ${sdcard}7 > /dev/null 2>&1
+	else
+	    mkfs -F -t ext4 -L linux ${sdcard}7 > /dev/null 2>&1
+	fi
+fi
+if [ $? -ne 0 ]; then
+	echo "ERROR formating linux partition."
+	exit 1
+fi
+echo "linux partition formated."
+sync
+
+# === WRITE u-boot SECTION ===
+echo
+write_uboot_section
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+echo ""
+echo "=================================================================="
+echo "Triple sd card prepared on $sdcard."
+echo "=================================================================="
+echo ""
+    
+# ======================================================================

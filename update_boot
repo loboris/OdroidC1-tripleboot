@@ -1,0 +1,61 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+
+. params.sh
+
+echo ""
+date
+echo "**********************************"
+echo "Update triple boot sd card u-boot "
+echo "**********************************"
+echo ""
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 2
+
+. func.sh
+
+
+# CHECK
+# ======================================================================
+
+check_bootfiles
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+check_sdcard "nocreate"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+
+echo -n "WARNING: BOOT section on SD card $sdcard WILL BE UPDATED !, Continue (y/N)?  "
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+
+echo
+
+write_uboot_section
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+echo ""
+echo "==================================="
+echo "Triple boot sd card u-boot updated."
+echo "==================================="
+echo ""
+    
+# ======================================================================

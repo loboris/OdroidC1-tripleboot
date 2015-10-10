@@ -1,0 +1,189 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+. params.sh
+. func.sh
+
+echo ""
+date
+echo "***************************************"
+echo "Restore triple boot sd card from backup"
+echo "***************************************"
+echo ""
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 2
+
+
+#--- CHECK --------------------------------------------------------------------------
+check_sdcard "nocreate"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+get_partstruct
+
+
+if [ "${system_start}" = "" ] || [ "${userdata_start}" = "" ] || [ "${cache_start}" = "" ] || [ "${storage_start}" = "" ]; then
+	echo "Bad SDCard partition structure !"
+	exit 1
+fi
+if [ "${dualb}" = "" ]; then
+	echo "Bad SDCard partition structure 2!"
+else
+	if [ ! "${storage_start}" = "49152" ]; then
+		echo "Bad SDCard partition structure 3!"
+		exit 1
+	fi
+fi
+
+#-----------------------------------------------------------------------
+
+#------------------------------------------------------------------------------------
+echo -n "WARNING: Data on $sdcard WILL BE UPDATED !, Continue (y/N)?  "
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+echo "."
+#------------------------------------------------------------------------------------
+
+
+mkdir _mnt > /dev/null 2>&1
+
+
+if [ "${_isimage}" = "yes" ] ; then
+	map_image
+	if [ $? -ne 0 ]; then
+		exit 1
+	fi
+	partmap=$loop_mapp
+else
+	partmap=$sdcard
+fi
+
+
+mkdir _mnt > /dev/null 2>&1
+umount _mnt > /dev/null 2>&1
+
+mount ${partmap}2 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${partmap}2"
+	exit 1
+fi
+echo "Copying system partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${bkpdir}/system/ _mnt/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/system | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+
+mount ${partmap}3 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${partmap}3"
+	exit 1
+fi
+echo ""
+echo "Copying userdata partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${bkpdir}/userdata/ _mnt/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/userdata | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+
+mount ${partmap}${ncache} _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${partmap}${ncache}"
+	exit 1
+fi
+echo ""
+echo "Copying cache partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/cache/ _mnt/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/cache | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+
+mount ${partmap}1 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${partmap}1"
+	exit 1
+fi
+echo ""
+echo "Copying storage partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${bkpdir}/storage/ _mnt/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/storage | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+
+if [ ! "${skip_OpenELEC}" = "yes" ]; then
+  mount ${partmap}6 _mnt > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+	  echo "ERROR mounting ${partmap}6"
+	  exit 1
+  fi
+  echo ""
+  echo "Copying openElec partition ..."
+  rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${bkpdir}/openElec/ _mnt/ > /dev/null 2>&1
+  sync
+  fs_size=`du -s -h ${bkpdir}/openElec | awk '{print $1}'`
+  echo "File system size: $fs_size"
+  umount _mnt
+fi
+
+
+if [ ! "${skip_linux}" = "yes" ]; then
+    _get_fstype=`file -sL ${partmap}7 | grep BTRFS`
+
+    if [ ! "${_get_fstype}" = "" ] ; then
+	mount -o compress-force=lzo ${partmap}7 _mnt > /dev/null 2>&1
+    else
+	mount ${partmap}7 _mnt > /dev/null 2>&1
+    fi
+    if [ $? -ne 0 ]; then
+	    echo "ERROR mounting ${partmap}7"
+	    exit 1
+    fi
+    echo ""
+    if [ ! "${_get_fstype}" = "" ] ; then
+      echo "Copying Linux partition (btrfs) ..."
+    else
+      echo "Copying Linux partition ..."
+    fi
+    rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats ${bkpdir}/linux/ _mnt/ > /dev/null 2>&1
+    sync
+    fs_size=`du -s -h ${bkpdir}/linux | awk '{print $1}'`
+    echo "File system size: $fs_size"
+    umount _mnt
+fi
+
+echo ""
+echo "=================================================================="
+echo "Triple sd card $sdcard restored from $bkpdir."
+echo "=================================================================="
+echo ""
+
+#==================================
+if [ "${_isimage}" = "yes" ] ; then
+  unmap_image
+fi
+#==================================
+
+
+exit 0
+
+
+# -------------------------------------------------------------------

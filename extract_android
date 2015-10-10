@@ -1,0 +1,152 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+. params.sh
+. func.sh
+
+echo ""
+date
+echo "***********************************************"
+echo "* Extracting structure of android SD Card     *"
+echo "* and copying partitions data to directories  *"
+echo "***********************************************"
+echo ""
+
+
+check_sdcard "noimage"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 1
+
+mkdir -p ${bkpdir} > /dev/null 2>&1
+
+#=======================================================================
+
+get_partstruct
+
+echo ""
+if [ "${system_start}" = "" ] || [ "${userdata_start}" = "" ] || [ "${cache_start}" = "" ] || [ "${storage_start}" = "" ]; then
+	echo "Bad SDCard partition structure !"
+	exit 1
+fi
+if [ "${dualb}" = "" ]; then
+	if [ ! "${system_start}" = "49152" ]; then
+		echo "Bad SDCard partition structure (start) !"
+		exit 1
+	fi
+else
+	if [ ! "${storage_start}" = "49152" ]; then
+		echo "Bad SDCard partition structure (start)!"
+		exit 1
+	fi
+	echo "SDCard is tripleboot card!"
+fi
+
+
+echo ""
+echo -n "WARNING: Android files in $bkpdir WILL BE UPDATED !, Continue (y/N)?  "
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+
+echo ""
+if [ "${dualb}" = "" ]; then
+    echo "Extracting android u-boot sections, $system_start, $(expr $system_start / 2048 )M ..."
+else
+    echo "Extracting android u-boot sections, $storage_start, $(expr $storage_start / 2048 )M ..."
+fi
+read_uboot_section
+
+# EXTRACT FILE SYSTEMs
+echo ""
+
+
+mkdir _mnt > /dev/null 2>&1
+umount _mnt > /dev/null 2>&1
+
+#----------------------------------------------------------------------------------------------------------
+mkdir ${bkpdir}/system > /dev/null 2>&1
+mount ${sdcard}2 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${sdcard}2"
+	exit 1
+fi
+echo "Copying system partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/system/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/system | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+#----------------------------------------------------------------------------------------------------------
+
+#----------------------------------------------------------------------------------------------------------
+mkdir ${bkpdir}/userdata > /dev/null 2>&1
+mount ${sdcard}3 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${sdcard}3"
+	exit 1
+fi
+echo ""
+echo "Copying userdata partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/userdata/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/userdata | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+mkdir ${bkpdir}/cache > /dev/null 2>&1
+mount ${sdcard}${ncache} _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${sdcard}${ncache}"
+	exit 1
+fi
+#----------------------------------------------------------------------------------------------------------
+
+#----------------------------------------------------------------------------------------------------------
+echo ""
+echo "Copying cache partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/cache/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/cache | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+mkdir ${bkpdir}/storage > /dev/null 2>&1
+mount ${sdcard}1 _mnt > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+	echo "ERROR mounting ${sdcard}1"
+	exit 1
+fi
+#----------------------------------------------------------------------------------------------------------
+
+#----------------------------------------------------------------------------------------------------------
+echo ""
+echo "Copying storage partition ..."
+rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/storage/ > /dev/null 2>&1
+sync
+fs_size=`du -s -h ${bkpdir}/storage | awk '{print $1}'`
+echo "File system size: $fs_size"
+umount _mnt
+
+#----------------------------------------------------------------------------------------------------------
+sync
+
+echo ""
+echo "====================================================================="
+echo "Android SDCard structure saved, filesystems extracted to directories."
+echo "====================================================================="
+echo ""
+# -------------------------------------------------------------------

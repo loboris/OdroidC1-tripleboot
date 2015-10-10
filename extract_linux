@@ -1,0 +1,231 @@
+#!/bin/bash
+
+
+if [ "$(id -u)" != "0" ]; then
+   echo "Script must be run as root !"
+   exit 0
+fi
+
+
+. params.sh
+. func.sh
+
+echo ""
+date
+echo "***************************************************"
+echo "* Extracting structure of odroid linux SD Card    *"
+echo "* and copying partitions data to directories      *"
+echo "***************************************************"
+echo ""
+
+
+check_sdcard "nocreate"
+if [ $? -ne 0 ]; then
+	exit $?
+fi
+
+umount ${sdcard}* > /dev/null 2>&1
+sleep 1
+
+mkdir -p ${bkpdir} > /dev/null 2>&1
+
+#=======================================================================
+
+# Calculate partitions offsets and sizes
+echo ""
+echo "Analyzing sd card ..."
+sdcard_part=`fdisk -l $sdcard | grep Linux | awk '{print $1}'`
+sdcard_sect=`fdisk -l $sdcard | grep "Disk $sdcard" | awk '{print $7}'`
+if [ "${sdcard_sect}" = "" ]; then
+    sdcard_sect=`fdisk -l $sdcard | grep total | awk '{print $8}'`
+fi
+sdcard_end=$(expr $sdcard_sect - 1024)
+
+fat=`fdisk -l $sdcard | grep FAT`
+if [ "${fat}" = "" ]; then
+  linuxpart="1"
+else
+  linuxpart="2"
+fi
+
+if [ "${linuxpart}" = "2" ]; then
+	fat_start=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $2}'`
+	if [ "${fat_start}" = "*" ]; then
+	  fat_start=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $3}'`
+	  fat_end=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $4}'`
+	else
+	  fat_end=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $3}'`
+	fi
+	fat_size=$(( ($fat_end - $fat_start + 1) / 2048 ))
+	linux_start=`fdisk -l $sdcard | grep ${sdcard}2 | awk '{print $2}'`
+	linux_end=`fdisk -l $sdcard | grep ${sdcard}2 | awk '{print $3}'`
+	linux_size=$(( ($linux_end - $linux_start + 1) / 2048 ))
+else
+	linux_start=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $2}'`
+	if [ "${linux_start}" = "*" ]; then
+	  linux_start=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $3}'`
+	  linux_end=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $4}'`
+	else
+	  linux_end=`fdisk -l $sdcard | grep ${sdcard}1 | awk '{print $3}'`
+	fi
+	linux_size=$(( ($linux_end - $linux_start + 1) / 2048 ))
+fi
+
+echo ""
+echo "  SDCard size: $sdcard_sect blocks, $(expr $sdcard_sect / 2048 ) M"
+echo "------------------------------------------------"
+if [ "${linuxpart}" = "2" ]; then
+	printf "%14s" "FAT part:"; printf "%12s" $fat_start; printf "%12s" $fat_end; printf "%10s\n" "$fat_size M"
+fi
+	printf "%14s" "linux part:"; printf "%12s" $linux_start; printf "%12s" $linux_end; printf "%10s\n" "$linux_size M"
+echo "------------------------------------------------"
+echo ""
+
+
+if [ "${linuxpart}" = "2" ]; then
+	if [ "${fat_start}" = "" ] || [ "${linux_start}" = "" ]; then
+		echo "Bad SDCard partition structure !"
+		exit 1
+	fi
+	if [ ! "${fat_start}" = "3072" ] && [ ! "${fat_start}" = "2048" ]; then
+		echo "Bad SDCard partition structure (start) !"
+		exit 1
+	fi
+	if [ "${fat_start}" = "3072" ]; then
+	  _disk_start="3072"
+	else
+	  _disk_start="2048"
+	fi
+else
+	if [ "${linux_start}" = "" ]; then
+		echo "Bad SDCard partition structure !"
+		exit 1
+	fi
+	if [ ! "${linux_start}" = "3072" ] && [ ! "${linux_start}" = "2048" ]; then
+		echo "Bad SDCard partition structure (start)!"
+		exit 1
+	fi
+	if [ "${linux_start}" = "3072" ]; then
+	  _disk_start="3072"
+	else
+	  _disk_start="2048"
+	fi
+	echo "SDCard is ext4 only card!"
+fi
+
+mkdir _mnt > /dev/null 2>&1
+umount _mnt > /dev/null 2>&1
+mkdir _mnt1 > /dev/null 2>&1
+umount _mnt1 > /dev/null 2>&1
+
+echo ""
+echo -n "WARNING: Linux files in $bkpdir/linux WILL BE UPDATED !, Continue (y/N)?  "
+read -n 1 ANSWER
+
+if [ ! "${ANSWER}" = "y" ] ; then
+    echo "."
+    echo "Canceled.."
+    exit 0
+fi
+echo ""
+
+
+# EXTRACTING FILES
+
+echo ""
+if [ "${_isimage}" = "yes" ]; then
+	kpartx -l ${sdcard} > /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "ERROR testing kpartx"
+		exit 1
+	fi
+	loop_dev=`kpartx -l $sdcard | grep ${_disk_start} | sed s/"\// "/g | awk '{print $6}'`
+
+	kpartx -a -s ${sdcard} > /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting with kpartx"
+		exit 1
+	fi
+        sleep 1
+	if [ "${linuxpart}" = "2" ]; then
+		mkdir ${bkpdir}/lin_fat > /dev/null 2>&1
+		loop_mapp="/dev/mapper/${loop_dev}p1"
+		mount ${loop_mapp} _mnt > /dev/null 2>&1
+		if [ $? -ne 0 ]; then
+			echo "ERROR mounting ${loop_mapp}"
+			kpartx -d -s ${sdcard} > /dev/null 2>&1
+			dmsetup remove /dev/mapper/${loop_dev}p* > /dev/null 2>&1
+			losetup -d /dev/${loop_dev} > /dev/null 2>&1
+			exit 1
+		fi
+		echo "Copying FAT partition ..."
+		rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/lin_fat/ > /dev/null 2>&1
+		sync
+		fs_size=`du -s -h ${bkpdir}/lin_fat | awk '{print $1}'`
+		echo "File system size: $fs_size"
+		umount _mnt
+	fi
+	loop_mapp="/dev/mapper/${loop_dev}p${linuxpart}"
+	mkdir ${bkpdir}/linux > /dev/null 2>&1
+		mount ${loop_mapp} _mnt > /dev/null 2>&1
+		if [ $? -ne 0 ]; then
+			echo "ERROR mounting ${loop_mapp}"
+			kpartx -d -s ${sdcard} > /dev/null 2>&1
+			dmsetup remove /dev/mapper/${loop_dev}p* > /dev/null 2>&1
+			losetup -d /dev/${loop_dev} > /dev/null 2>&1
+			exit 1
+		fi
+	echo ""
+	echo "Copying linux partition ..."
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/linux/ > /dev/null 2>&1
+	sync
+	fs_size=`du -s -h ${bkpdir}/linux | awk '{print $1}'`
+	echo "File system size: $fs_size"
+
+	sync
+        sleep 2
+	umount _mnt > /dev/null 2>&1
+        sleep 2
+	kpartx -d -s ${sdcard} > /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "WARNING: ERROR unmounting with kpartx"
+	fi
+	dmsetup remove /dev/mapper/${loop_dev}p* > /dev/null 2>&1
+	losetup -d /dev/${loop_dev} > /dev/null 2>&1
+else
+	if [ "${linuxpart}" = "2" ]; then
+		mkdir ${bkpdir}/lin_fat > /dev/null 2>&1
+		mount ${sdcard}1 _mnt > /dev/null 2>&1
+		if [ $? -ne 0 ]; then
+			echo "ERROR mounting ${sdcard}2"
+			exit 1
+		fi
+		echo "Copying FAT partition ..."
+		rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/lin_fat/ > /dev/null 2>&1
+		sync
+		fs_size=`du -s -h ${bkpdir}/lin_fat | awk '{print $1}'`
+		echo "File system size: $fs_size"
+		umount _mnt
+	fi
+	mkdir ${bkpdir}/linux > /dev/null 2>&1
+	mount ${sdcard}${linuxpart} _mnt > /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		echo "ERROR mounting ${sdcard}${linuxpart}"
+		exit 1
+	fi
+	echo ""
+	echo "Copying linux partition ..."
+	rsync -r -t -p -o -g -x --delete -l -H -D --numeric-ids -s --stats _mnt/ ${bkpdir}/linux/ > /dev/null 2>&1
+	sync
+	fs_size=`du -s -h ${bkpdir}/linux | awk '{print $1}'`
+	echo "File system size: $fs_size"
+	umount _mnt
+fi
+
+sync
+echo ""
+echo "==================================="
+echo "Linux SDCard filesystems extracted."
+echo "==================================="
+echo ""
+# -------------------------------------------------------------------
